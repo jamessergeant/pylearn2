@@ -807,7 +807,7 @@ class MLP(Layer):
         each layer's input scale is determined by the same scheme as the input
         probabilities.
         """
-
+        
         if input_include_probs is None:
             input_include_probs = {}
 
@@ -842,7 +842,6 @@ class MLP(Layer):
                 per_example=per_example
             )
             state_below = layer.fprop(state_below)
-
         return state_below
 
     def masked_fprop(self, state_below, mask, masked_input_layers=None,
@@ -1141,8 +1140,6 @@ class Softmax(Layer):
         the same element can be included more than once).
     non_redundant : bool
         If True, learns only n_classes - 1 biases and weight vectors
-    kwargs : dict
-        Passed on to the superclass.
     """
 
     def __init__(self, n_classes, layer_name, irange=None,
@@ -1151,10 +1148,9 @@ class Softmax(Layer):
                  b_lr_scale=None, max_row_norm=None,
                  no_affine=False,
                  max_col_norm=None, init_bias_target_marginals=None,
-                 binary_target_dim=None, non_redundant=False,
-                 **kwargs):
+                 binary_target_dim=None, non_redundant=False):
 
-        super(Softmax, self).__init__(**kwargs)
+        super(Softmax, self).__init__()
 
         if max_col_norm is not None:
             self.extensions.append(MaxL2FilterNorm(max_col_norm, axis=0))
@@ -1897,8 +1893,6 @@ class Linear(Layer):
         median of the data.
     use_bias : bool, optional
         If False, does not add the bias term to the output.
-    kwargs : dict
-        Passed on to superclass constructor.
     """
 
     def __init__(self,
@@ -1919,14 +1913,15 @@ class Linear(Layer):
                  copy_input=None,
                  use_abs_loss=False,
                  use_bias=True,
-                 **kwargs):
+                 enc_layer=None,
+                 cost_weight=1):
 
         if copy_input is not None:
             raise AssertionError(
                 "The copy_input option had a bug and has "
                 "been removed from the library.")
 
-        super(Linear, self).__init__(**kwargs)
+        super(Linear, self).__init__()
 
         if use_bias and init_bias is None:
             init_bias = 0.
@@ -1991,39 +1986,76 @@ class Linear(Layer):
         self.output_space = VectorSpace(self.dim)
 
         rng = self.mlp.rng
-        if self.irange is not None:
-            assert self.istdev is None
-            assert self.sparse_init is None
-            W = rng.uniform(-self.irange,
-                            self.irange,
-                            (self.input_dim, self.dim)) * \
-                (rng.uniform(0., 1., (self.input_dim, self.dim))
-                 < self.include_prob)
-        elif self.istdev is not None:
-            assert self.sparse_init is None
-            W = rng.randn(self.input_dim, self.dim) * self.istdev
+        # JAMES - added for multimodal AE with tied weights
+        if self.enc_layer is not None:
+
+            # JAMES - creates a dictionary of all layers/sublayers if it doesn't already exist
+            if not hasattr(self.mlp,'layer_dict'):
+
+                self.mlp.layer_dict = dict()
+                layers = list(self.mlp.layers)
+
+                for layer in layers:
+
+                    self.mlp.layer_dict[layer.layer_name] = layer
+
+                for layer in layers:
+
+                    if hasattr(layer,'raw_layer'):
+
+                        layers.append(layer.raw_layer)
+                        self.mlp.layer_dict[layer.raw_layer.layer_name] = layer.raw_layer
+
+                    elif hasattr(layer,'layers'):
+
+                        for l in layer.layers:
+
+                            layers.append(l)
+                            self.mlp.layer_dict[l.layer_name] = l
+
+                    else:
+
+                        self.mlp.layer_dict[layer.layer_name] = layer
+
+            self.transformer = self.mlp.layer_dict[self.enc_layer].transformer #.construct_transpose()
+
         else:
-            assert self.sparse_init is not None
-            W = np.zeros((self.input_dim, self.dim))
+            #  END JAMES - untab else contents
+            if self.irange is not None:
+                assert self.istdev is None
+                assert self.sparse_init is None
+                W = rng.uniform(-self.irange,
+                                self.irange,
+                                (self.input_dim, self.dim)) * \
+                    (rng.uniform(0., 1., (self.input_dim, self.dim))
+                     < self.include_prob)
+            elif self.istdev is not None:
+                assert self.sparse_init is None
+                W = rng.randn(self.input_dim, self.dim) * self.istdev
+            else:
+                assert self.sparse_init is not None
+                W = np.zeros((self.input_dim, self.dim))
 
-            def mask_rejects(idx, i):
-                if self.mask_weights is None:
-                    return False
-                return self.mask_weights[idx, i] == 0.
+                def mask_rejects(idx, i):
+                    if self.mask_weights is None:
+                        return False
+                    return self.mask_weights[idx, i] == 0.
 
-            for i in xrange(self.dim):
-                assert self.sparse_init <= self.input_dim
-                for j in xrange(self.sparse_init):
-                    idx = rng.randint(0, self.input_dim)
-                    while W[idx, i] != 0 or mask_rejects(idx, i):
+                for i in xrange(self.dim):
+                    assert self.sparse_init <= self.input_dim
+                    for j in xrange(self.sparse_init):
                         idx = rng.randint(0, self.input_dim)
-                    W[idx, i] = rng.randn()
-            W *= self.sparse_stdev
+                        while W[idx, i] != 0 or mask_rejects(idx, i):
+                            idx = rng.randint(0, self.input_dim)
+                        W[idx, i] = rng.randn()
+                W *= self.sparse_stdev
 
-        W = sharedX(W)
-        W.name = self.layer_name + '_W'
+            self.orig_W = W
+            W = sharedX(self.orig_W)
+            W.name = self.layer_name + '_W'
 
-        self.transformer = MatrixMul(W)
+            self.transformer = MatrixMul(W)
+
 
         W, = self.transformer.get_params()
         assert W.name is not None
@@ -2196,8 +2228,19 @@ class Linear(Layer):
         if self.requires_reformat:
             state_below = self.input_space.format_as(state_below,
                                                      self.desired_space)
+            
+        # JAMES - altered for MM AE
+        if hasattr(self,'enc_layer'):
+            if self.enc_layer is not None:
+                z = self.transformer.lmul_T(state_below)
+            else:
+                # END JAMES - untab next line
+                z = self.transformer.lmul(state_below)
+        else:
+            # END JAMES - untab next line
+            z = self.transformer.lmul(state_below)
 
-        z = self.transformer.lmul(state_below)
+
         if self.use_bias:
             z += self.b
 
@@ -3901,12 +3944,17 @@ class LinearGaussian(Linear):
 
     @wraps(Linear.cost)
     def cost(self, Y, Y_hat):
-        return (0.5 * T.dot(T.sqr(Y - Y_hat), self.beta).mean() -
+        # JAMES - weighted average of costs, original commented out below
+        return self.cost_weight*(0.5 * T.dot(T.sqr(Y - Y_hat), self.beta).mean() -
                 0.5 * T.log(self.beta).sum())
+        # return (0.5 * T.dot(T.sqr(Y - Y_hat), self.beta).mean() -
+        #         0.5 * T.log(self.beta).sum())
 
     @wraps(Linear.cost_matrix)
     def cost_matrix(self, Y, Y_hat):
-        return 0.5 * T.sqr(Y - Y_hat) * self.beta - 0.5 * T.log(self.beta)
+        # JAMES - weighted average of costs, original commented out below
+        return self.cost_weight*(0.5 * T.sqr(Y - Y_hat) * self.beta - 0.5 * T.log(self.beta))
+        # return 0.5 * T.sqr(Y - Y_hat) * self.beta - 0.5 * T.log(self.beta)
 
     @wraps(Layer._modify_updates)
     def _modify_updates(self, updates):
