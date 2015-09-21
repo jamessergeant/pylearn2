@@ -71,10 +71,10 @@ def init_sigmoid_bias_from_array(arr):
         WRITEME
     """
     X = arr
-    if not (X.max() == 1):
+    if (X.max() > 1):           # JAMES changed this
         raise ValueError("Expected design matrix to consist entirely "
                 "of 0s and 1s, but maximum value is "+str(X.max()))
-    if X.min() != 0.:
+    if X.min() < 0.:            # JAMES changed this
         raise ValueError("Expected design matrix to consist entirely of "
                 "0s and 1s, but minimum value is "+str(X.min()))
     # removed this check so we can initialize the marginals
