@@ -2048,8 +2048,6 @@ class GaussianVisLayer(VisibleLayer):
             axes = ('b', 0, 1, 'c')):
         super(type(self), self).__init__()
 
-        warnings.warn("GaussianVisLayer math very faith based, need to finish working through gaussian.lyx")
-
         self.__dict__.update(locals())
         del self.self
 
